@@ -30,7 +30,7 @@ connectDB();
 app.use(cors({ origin: process.env.CORS_ORIGIN }));
 app.use(express.json({ limit: '5mb' }));
 app.use(express.urlencoded({ extended: true }));
-app.use(express.static(__dirname)); // Serve os arquivos HTML a partir do diretório raiz
+app.use(express.static(__dirname));
 
 // --- Rotas da API ---
 app.use('/api/auth', authRouter);
@@ -52,35 +52,52 @@ app.get('/api/profile/:username', async (req, res) => {
 // Rota PÚBLICA v2 para obter dados para o dashboard (com fotos de perfil)
 app.get('/api/dashboard_v2', async (req, res) => {
     try {
-        // Busca os 10 melhores jogadores
-        const topPlayers = await User.find()
-            .sort({ 'stats.rank': -1 })
-            .limit(10)
-            .select('username stats.rank profilePicture');
-
-        // Busca os 10 jogos em andamento
-        const liveGames = await Game.find({ status: 'inprogress' })
-            .sort({ startTime: -1 })
-            .limit(10)
-            .populate('player1', 'username profilePicture')
-            .populate('player2', 'username profilePicture');
-
-        // Busca as 10 últimas mensagens
-        const latestMessages = await ChatMessage.find()
-            .sort({ createdAt: -1 })
-            .limit(10)
-            .populate('sender', 'username profilePicture');
-
-        res.status(200).json({
-            topPlayers,
-            liveGames,
-            latestMessages
-        });
-
+        const topPlayers = await User.find().sort({ 'stats.rank': -1 }).limit(10).select('username stats.rank profilePicture');
+        const liveGames = await Game.find({ status: 'inprogress' }).sort({ startTime: -1 }).limit(10).populate('player1', 'username profilePicture').populate('player2', 'username profilePicture');
+        const latestMessages = await ChatMessage.find().sort({ createdAt: -1 }).limit(10).populate('sender', 'username profilePicture');
+        res.status(200).json({ topPlayers, liveGames, latestMessages });
     } catch (error) {
         res.status(500).json({ message: 'Erro no servidor ao buscar dados para o dashboard.', error: error.message });
     }
 });
+
+// Rota para buscar jogos disponíveis (requer autenticação)
+app.get('/api/games/available', async (req, res) => {
+    try {
+        const token = req.headers['authorization']?.split(' ')[1];
+        if (!token) return res.status(401).json({ message: 'Acesso não autorizado' });
+        jwt.verify(token, process.env.JWT_SECRET);
+
+        const availableGames = await Game.find({ status: 'waiting' })
+            .populate('player1', 'username')
+            .sort({ startTime: -1 });
+        
+        res.status(200).json(availableGames);
+    } catch (error) {
+         if (error.name === 'JsonWebTokenError') {
+            return res.status(401).json({ message: 'Token inválido' });
+        }
+        res.status(500).json({ message: 'Erro ao buscar jogos disponíveis', error: error.message });
+    }
+});
+
+// Rota para buscar todos os usuários (requer autenticação)
+app.get('/api/users/all', async (req, res) => {
+    try {
+        const token = req.headers['authorization']?.split(' ')[1];
+        if (!token) return res.status(401).json({ message: 'Acesso não autorizado' });
+        jwt.verify(token, process.env.JWT_SECRET);
+
+        const allUsers = await User.find().select('username profilePicture');
+        res.status(200).json(allUsers);
+    } catch (error) {
+         if (error.name === 'JsonWebTokenError') {
+            return res.status(401).json({ message: 'Token inválido' });
+        }
+        res.status(500).json({ message: 'Erro ao buscar usuários', error: error.message });
+    }
+});
+
 
 // --- Criação do Servidor HTTP ---
 const server = http.createServer(app);
@@ -246,7 +263,14 @@ server.on('upgrade', async (request, socket, head) => {
             if(!gameId) throw new Error('GameId não fornecido');
 
             const gameData = activeGames.get(gameId);
-            if(!gameData || !gameData.game) throw new Error('Jogo inválido ou não encontrado.');
+            if(!gameData || !gameData.game) {
+                // Se não está na memória, tenta carregar do DB.
+                const gameFromDb = await Game.findById(gameId);
+                if (!gameFromDb) throw new Error('Jogo inválido ou não encontrado.');
+                
+                activeGames.set(gameId, { game: gameFromDb, player1Ws: null, player2Ws: null });
+                gameData = activeGames.get(gameId);
+            }
             
             const game = gameData.game;
 
