@@ -1,4 +1,4 @@
-// server.js (Versão Completa e Unificada)
+// server.js (Versão Final com Roteador de WebSocket Unificado)
 
 // --- Dependências ---
 const express = require('express');
@@ -22,15 +22,9 @@ const gameLogic = require('./gameLogic');
 // --- Configuração Inicial ---
 const app = express();
 const PORT = process.env.PORT || 3000;
-
-// --- Constantes de Jogo ---
-const LOBBY_TIMEOUT = 120 * 1000; // 2 minutos
-const TURN_TIMEOUT = 60 * 1000; // 60 segundos
-const RECONNECTION_TIMEOUT = 60 * 1000; // 60 segundos
-const RANK_PENALTY = 500;
+const LOBBY_TIMEOUT = 120 * 1000, TURN_TIMEOUT = 60 * 1000, RECONNECTION_TIMEOUT = 60 * 1000, RANK_PENALTY = 500;
 
 connectDB();
-
 app.use(cors({ origin: process.env.CORS_ORIGIN }));
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
@@ -113,7 +107,6 @@ async function startGame(gameId) {
 app.use('/api/auth', authModule.router);
 app.use('/api/admin', adminRouter);
 
-// Rota pública para buscar dados de um perfil de usuário.
 app.get('/api/profile/:username', async (req, res) => {
     try {
         const user = await User.findOne({ username: req.params.username }).select('-password -resetPasswordToken -resetPasswordExpires');
@@ -124,14 +117,9 @@ app.get('/api/profile/:username', async (req, res) => {
     }
 });
 
-// Rota para atualizar o perfil do usuário (requer autenticação)
-app.put('/api/profile/update', async (req, res) => {
+app.put('/api/profile/update', authModule.verifyToken, async (req, res) => {
     try {
-        const token = req.headers['authorization']?.split(' ')[1];
-        if (!token) return res.status(401).json({ message: 'Acesso não autorizado' });
-        
-        const decoded = jwt.verify(token, process.env.JWT_SECRET);
-        const userId = decoded.id;
+        const userId = req.user.id;
         const { bio, image } = req.body;
         const user = await User.findById(userId);
         if (!user) return res.status(404).json({ message: 'Usuário não encontrado.' });
@@ -143,13 +131,11 @@ app.put('/api/profile/update', async (req, res) => {
         await user.save();
         res.status(200).json({ message: 'Perfil atualizado com sucesso!', updatedUser: { bio: user.bio, profilePicture: user.profilePicture } });
     } catch (error) {
-        if (error.name === 'JsonWebTokenError') return res.status(401).json({ message: 'Token inválido' });
         console.error("Erro ao atualizar perfil:", error);
         res.status(500).json({ message: 'Erro no servidor ao atualizar o perfil.', error: error.message });
     }
 });
 
-// Rota PÚBLICA v2 para obter dados para o dashboard
 app.get('/api/dashboard_v2', async (req, res) => {
     try {
         const topPlayers = await User.find().sort({ 'stats.rank': -1 }).limit(10).select('username stats.rank profilePicture');
@@ -157,11 +143,10 @@ app.get('/api/dashboard_v2', async (req, res) => {
         const latestMessages = await ChatMessage.find().sort({ createdAt: -1 }).limit(10).populate('sender', 'username profilePicture');
         res.status(200).json({ topPlayers, liveGames, latestMessages });
     } catch (error) {
-        res.status(500).json({ message: 'Erro no servidor ao buscar dados para o dashboard.', error: error.message });
+        res.status(500).json({ message: 'Erro ao buscar dados para o dashboard.', error: error.message });
     }
 });
 
-// Rota para buscar jogos disponíveis (usada pelo lobby)
 app.get('/api/games/available', authModule.verifyToken, async (req, res) => {
     try {
         const games = await Game.find({ status: 'waiting' }).populate('player1', 'username profilePicture _id').sort({ startTime: -1 });
@@ -171,11 +156,10 @@ app.get('/api/games/available', authModule.verifyToken, async (req, res) => {
     }
 });
 
-// Rota para CRIAR uma nova partida
 app.post('/api/game/create', authModule.verifyToken, async (req, res) => {
     try {
         const userId = req.user.id;
-        const existingGame = await Game.findOne({ player1: userId, status: 'waiting' });
+        const existingGame = await Game.findOne({ player1: userId, status: { $in: ['waiting', 'readying'] } });
         if (existingGame) {
             return res.status(400).json({ message: 'Você já tem uma partida aberta.' });
         }
@@ -189,14 +173,13 @@ app.post('/api/game/create', authModule.verifyToken, async (req, res) => {
                 cleanupGame(game._id.toString());
             }
         }, LOBBY_TIMEOUT);
-        activeGames.set(game._id.toString(), { game, lobbyTimer, turnTimer: null, p1ReconnectionTimer: null, p2ReconnectionTimer: null, player1Ready: false, player2Ready: false });
+        activeGames.set(game._id.toString(), { game, lobbyTimer, player1Ready: false, player2Ready: false });
         res.status(201).json({ gameId: game._id });
     } catch (error) {
         res.status(500).json({ message: 'Erro ao criar jogo', error: error.message });
     }
 });
 
-// Rota para um oponente ENTRAR em uma partida
 app.post('/api/game/join/:gameId', authModule.verifyToken, async (req, res) => {
     try {
         const gameId = req.params.gameId;
@@ -219,7 +202,6 @@ app.post('/api/game/join/:gameId', authModule.verifyToken, async (req, res) => {
     }
 });
 
-// Rota para o criador CANCELAR a partida
 app.post('/api/game/cancel/:gameId', authModule.verifyToken, async (req, res) => {
     try {
         const gameId = req.params.gameId;
@@ -238,7 +220,6 @@ app.post('/api/game/cancel/:gameId', authModule.verifyToken, async (req, res) =>
     }
 });
 
-// Rota para buscar o histórico do chat
 app.get('/api/chat/history', authModule.verifyToken, async (req, res) => {
     try {
         const messages = await ChatMessage.find().sort({ createdAt: -1 }).limit(50).populate('sender', 'username profilePicture _id');
@@ -248,7 +229,6 @@ app.get('/api/chat/history', authModule.verifyToken, async (req, res) => {
     }
 });
 
-// Rota para buscar todos os usuários
 app.get('/api/users/all', authModule.verifyToken, async (req, res) => {
     try {
         const allUsers = await User.find().select('username profilePicture');
@@ -258,15 +238,16 @@ app.get('/api/users/all', authModule.verifyToken, async (req, res) => {
     }
 });
 
-
 // --- Servidor, WebSocket e Inicialização ---
 const server = http.createServer(app);
 const wssGame = new WebSocketServer({ noServer: true });
+const wssChat = initializeChat();
 
 wssGame.on('connection', (ws, req, user, game) => {
     const gameId = game._id.toString();
     const gameData = activeGames.get(gameId);
     const isPlayer1 = game.player1._id.equals(user.id);
+
     if (isPlayer1) {
         gameData.player1Ws = ws;
         if (gameData.p1ReconnectionTimer) {
@@ -282,53 +263,90 @@ wssGame.on('connection', (ws, req, user, game) => {
             broadcastToGame(gameId, { type: 'player_reconnected', player: user.id });
         }
     }
-    ws.on('message', async (message) => { /* ... lógica de 'message' ... */ });
-    ws.on('close', () => { /* ... lógica de 'close' ... */ });
+
+    ws.on('message', async (message) => {
+        const data = JSON.parse(message);
+        switch (data.type) {
+            case 'player_ready':
+                if (gameData.game.status !== 'readying') return;
+                if (isPlayer1) gameData.player1Ready = true;
+                else gameData.player2Ready = true;
+                broadcastToGame(gameId, { type: 'ready_status_update', p1_ready: gameData.player1Ready, p2_ready: gameData.player2Ready });
+                if (gameData.player1Ready && gameData.player2Ready) {
+                    await startGame(gameId);
+                }
+                break;
+            case 'make_move':
+                if (gameData.game.status !== 'inprogress' || !gameData.game.currentPlayer.equals(user.id)) return;
+                clearTimeout(gameData.turnTimer);
+                gameData.turnTimer = null;
+                // Lógica de validação e aplicação do movimento aqui...
+                break;
+        }
+    });
+
+    ws.on('close', () => {
+        console.log(`Jogador ${user.username} desconectou-se do jogo ${gameId}.`);
+        if (gameData && gameData.game.status === 'inprogress') {
+            broadcastToGame(gameId, { type: 'player_disconnected', player: user.id });
+            const timerType = isPlayer1 ? 'p1ReconnectionTimer' : 'p2ReconnectionTimer';
+            gameData[timerType] = setTimeout(() => {
+                const winnerId = isPlayer1 ? game.player2._id : game.player1._id;
+                handleGameEnd(gameId, winnerId, user.id, 'Oponente abandonou a partida', true);
+            }, RECONNECTION_TIMEOUT);
+        }
+    });
 });
 
 server.on('upgrade', async (request, socket, head) => {
     const { pathname, query } = url.parse(request.url, true);
-    if (pathname !== '/game') return;
+    const token = query.token;
 
     try {
-        const { token, gameId } = query;
-        if (!token || !gameId) throw new Error('Token ou GameId não fornecido.');
-        
+        if (!token) throw new Error('Token não fornecido.');
         const decoded = jwt.verify(token, process.env.JWT_SECRET);
         const user = await User.findById(decoded.id);
-        
-        let gameData = activeGames.get(gameId);
-        if (!gameData) {
-            const gameFromDb = await Game.findById(gameId).populate('player1').populate('player2');
-            if (!gameFromDb) throw new Error('Jogo não encontrado no DB.');
-            activeGames.set(gameId, { game: gameFromDb, player1Ready: false, player2Ready: false });
-            gameData = activeGames.get(gameId);
-        }
-        
-        const game = gameData.game;
-        if (!user || !game) throw new Error('Usuário ou Jogo inválido.');
+        if (!user) throw new Error('Usuário do token não encontrado.');
 
-        const isPlayer1 = game.player1._id.equals(user.id);
-        const isPlayer2 = game.player2 && game.player2._id.equals(user.id);
-        if (!isPlayer1 && !isPlayer2) throw new Error('Usuário não pertence a este jogo.');
-
-        wssGame.handleUpgrade(request, socket, head, (ws) => {
-            wssGame.emit('connection', ws, request, user, game);
-            const payload = { game: game.toObject() };
-            if (game.status === 'waiting') payload.type = 'waiting_opponent';
-            else if (game.status === 'readying') {
-                payload.type = 'player_joined';
-                payload.p1_ready = gameData.player1Ready;
-                payload.p2_ready = gameData.player2Ready;
+        if (pathname === '/game') {
+            const gameId = query.gameId;
+            if (!gameId) throw new Error('GameId não fornecido.');
+            let gameData = activeGames.get(gameId);
+            if (!gameData) {
+                const gameFromDb = await Game.findById(gameId).populate('player1').populate('player2');
+                if (!gameFromDb) throw new Error('Jogo não encontrado no DB.');
+                activeGames.set(gameId, { game: gameFromDb, player1Ready: false, player2Ready: false });
+                gameData = activeGames.get(gameId);
             }
-            else if (game.status === 'inprogress') payload.type = 'game_update';
-            ws.send(JSON.stringify(payload));
-        });
+            const game = gameData.game;
+            const isPlayer = game.player1._id.equals(user.id) || (game.player2 && game.player2._id.equals(user.id));
+            if (!isPlayer) throw new Error('Usuário não pertence a este jogo.');
+
+            wssGame.handleUpgrade(request, socket, head, (ws) => {
+                wssGame.emit('connection', ws, request, user, game);
+                const payload = { game: game.toObject() };
+                if (game.status === 'waiting') payload.type = 'waiting_opponent';
+                else if (game.status === 'readying') {
+                    payload.type = 'player_joined';
+                    payload.p1_ready = gameData.player1Ready;
+                    payload.p2_ready = gameData.player2Ready;
+                }
+                else if (game.status === 'inprogress') payload.type = 'game_update';
+                ws.send(JSON.stringify(payload));
+            });
+        } else if (pathname === '/') {
+            wssChat.handleUpgrade(request, socket, head, (ws) => {
+                ws.user = user;
+                wssChat.emit('connection', ws, request);
+            });
+        } else {
+            throw new Error('Caminho de WebSocket desconhecido.');
+        }
     } catch (err) {
-        console.error('Upgrade de WebSocket falhou:', err.message);
+        console.error(`Upgrade de WebSocket falhou para '${pathname}': ${err.message}`);
+        socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
         socket.destroy();
     }
 });
 
-initializeChat(server);
 server.listen(PORT, () => console.log(`Servidor rodando na porta ${PORT}`));
