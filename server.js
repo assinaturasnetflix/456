@@ -13,7 +13,7 @@ const url = require('url');
 
 // --- Módulos Internos ---
 const connectDB = require('./db');
-const { User, Game } = require('./models');
+const { User, Game, ChatMessage } = require('./models'); // ChatMessage adicionado para a rota do dashboard
 const { router: authRouter } = require('./auth');
 const adminRouter = require('./adminController');
 const { initializeChat } = require('./chatManager');
@@ -21,7 +21,7 @@ const gameLogic = require('./gameLogic');
 
 // --- Configuração Inicial ---
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 3000; // Render usa a variável de ambiente PORT
 
 // --- Conexão com o Banco de Dados ---
 connectDB();
@@ -49,6 +49,40 @@ app.get('/api/profile/:username', async (req, res) => {
         res.status(500).json({ message: 'Erro no servidor.', error: error.message });
     }
 });
+
+// Rota PÚBLICA para obter dados para o dashboard inicial
+app.get('/api/dashboard', async (req, res) => {
+    try {
+        // Busca os 5 melhores jogadores pelo ranking (em ordem decrescente)
+        const topPlayers = await User.find()
+            .sort({ 'stats.rank': -1 })
+            .limit(5)
+            .select('username stats.rank');
+
+        // Busca os 5 jogos em andamento mais recentes
+        const liveGames = await Game.find({ status: 'inprogress' })
+            .sort({ startTime: -1 })
+            .limit(5)
+            .populate('player1', 'username') // Pega o username do player1
+            .populate('player2', 'username'); // Pega o username do player2
+
+        // Busca as 5 últimas mensagens do chat
+        const latestMessages = await ChatMessage.find()
+            .sort({ createdAt: -1 })
+            .limit(5)
+            .populate('sender', 'username'); // Pega o username de quem enviou
+
+        res.status(200).json({
+            topPlayers,
+            liveGames,
+            latestMessages
+        });
+
+    } catch (error) {
+        res.status(500).json({ message: 'Erro no servidor ao buscar dados para o dashboard.', error: error.message });
+    }
+});
+
 
 // --- Criação do Servidor HTTP ---
 // Usamos o módulo http para ter mais controle e poder vincular o WebSocket Server.
